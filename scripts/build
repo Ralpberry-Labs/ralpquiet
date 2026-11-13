@@ -104,6 +104,7 @@ for kind in Microphone Speaker; do
         -Wno-format-extra-args -DkCanBeDefaultSystemDevice=false -DkEnableVolumeControl=false \
         "$d/blackhole/BlackHole/BlackHole.c" -o "$bundle/Contents/MacOS/Loopback"
     cp LICENSE "$bundle/Contents/Resources/LICENSE.txt"
+    cp third_party/BlackHole.txt "$bundle/Contents/Resources/"
     cp docs/THIRD-PARTY.md "$bundle/Contents/Resources/"
     codesign --force --sign - "$bundle"
 done
