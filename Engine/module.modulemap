@@ -1,0 +1,4 @@
+module QuietEngine {
+    header "Quiet.h"
+    export *
+}

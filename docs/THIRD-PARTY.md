@@ -1,0 +1,7 @@
+# Third-party software
+
+- RNNoise v0.2 (Xiph.Org and contributors), BSD-3-Clause: https://github.com/xiph/rnnoise/tree/v0.2. See `third_party/RNNoise.txt`. The default model is distributed by Xiph as generated C under the upstream project license; the build pins its archive hash.
+- miniaudio 0.11.25 (David Reid and contributors), MIT-0 option: https://github.com/mackron/miniaudio/tree/0.11.25. See `third_party/miniaudio.txt`.
+- The RalpQuiet loopback driver bundles are build-time configurations of BlackHole v0.7.2 (Existential Audio, Inc.), GPL-3.0: https://github.com/ExistentialAudio/BlackHole/tree/v0.7.2. See `LICENSE`. This project supplies its own device IDs, names, and bundle metadata. No BlackHole application branding or artwork is bundled. The scripts and pinned upstream revision provide the source to reproduce each bundle.
+- VoxLock streaming ONNX model by Arbaz Siddiqui, Apache-2.0, distributed through [the Sherpa-ONNX model release](https://github.com/arbazsiddiqui/voxlock/releases/tag/sherpa-onnx-models). See `third_party/VoxLock-LICENSE.txt` and `third_party/VoxLock-NOTICE.txt` for the REAL-TSE/WeSep provenance. No third-party benchmark audio is distributed.
+- [Sherpa-ONNX v2.0.1](https://github.com/k2-fsa/sherpa-onnx/tree/v2.0.1) (Apache-2.0) with [ONNX Runtime 1.28.2](https://github.com/microsoft/onnxruntime/tree/v1.28.2) (MIT and bundled dependencies). The C API and runtime are dynamically linked. See the corresponding licenses and notices in `third_party/`.

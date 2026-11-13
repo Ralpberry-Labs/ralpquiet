@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+bundle_dir="${1:-.dist}"
+hal="/Library/Audio/Plug-Ins/HAL"
+names=(RalpQuietMicrophone RalpQuietSpeaker)
+for name in "${names[@]}"; do
+    driver="$bundle_dir/$name.driver"
+    [[ -d "$driver" ]] || { echo "Build the app first with ./scripts/build." >&2; exit 1; }
+    codesign --verify --strict "$driver"
+done
+sudo -v
+for name in "${names[@]}"; do
+    sudo /usr/bin/ditto --norsrc --noextattr --noqtn "$bundle_dir/$name.driver" "$hal/$name.driver"
+    sudo /usr/sbin/chown -R root:wheel "$hal/$name.driver"
+    sudo /bin/chmod -R go-w "$hal/$name.driver"
+done
+printf 'RalpQuiet drivers installed. Restart your Mac and reopen your calling app.\n'

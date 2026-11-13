@@ -1,0 +1,110 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+root="$PWD"
+b="$root/.build"
+d="$b/deps"
+out="$root/.dist"
+mkdir -p "$d" "$b/obj" "$out"
+fetch_git() {
+    local name="$1" url="$2" tag="$3" commit="$4"
+    if [[ ! -d "$d/$name/.git" ]]; then
+        git clone -q --depth 1 --branch "$tag" "$url" "$d/$name"
+    fi
+    [[ "$(git -C "$d/$name" rev-parse HEAD)" == "$commit" ]] || {
+        echo "Unexpected $name revision" >&2; exit 1;
+    }
+}
+fetch_git rnnoise https://github.com/xiph/rnnoise v0.2 904a876dce1f9ab8860c0a5000ed151f9f6eef58
+fetch_git miniaudio https://github.com/mackron/miniaudio 0.11.25 9634bedb5b5a2ca38c1ee7108a9358a4e233f14d
+fetch_git blackhole https://github.com/ExistentialAudio/BlackHole v0.7.2 561d934c77a1fa64987e01ccabe890fed30e181f
+# All downloaded executables and weights are checked before use.
+fetch_file() {
+    local url="$1" path="$2" sum="$3"
+    if [[ ! -f "$path" ]]; then
+        curl --fail --location --silent --show-error --retry 3 --max-time 240 "$url" -o "$path.tmp"
+        echo "$sum  $path.tmp" | shasum -a 256 -c
+        mv "$path.tmp" "$path"
+    fi
+    if ! echo "$sum  $path" | shasum -a 256 -c; then
+        echo "Remove invalid cached file and rebuild: $path" >&2
+        return 1
+    fi
+}
+sherpa="sherpa-onnx-v2.0.1-osx-universal2-shared-no-tts-lib"
+fetch_file "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/$sherpa.tar.bz2" "$d/sherpa.tar.bz2" 242b0593a033456e9344a76a11713d1c55da794d0e37eabf6acabaf7beeb2b36
+fetch_file https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v2.0.1/sherpa-onnx/c-api/c-api.h "$d/sherpa-v2.0.1.h" 5698f38ba09ad2bdf085c56a6cbbd7741acf15e25f4ce5c7097b9702cadf437f
+tar xf "$d/sherpa.tar.bz2" -C "$d"
+mkdir -p "$d/voxlock" "$out/Frameworks"
+vox_base=https://github.com/arbazsiddiqui/voxlock/releases/download/sherpa-onnx-models
+fetch_file "$vox_base/voxlock_enroll.onnx" "$d/voxlock/voxlock_enroll.onnx" 5d06048c156bb8cd422d29848e6d38fb26a7b39f6f7fd92eccf2a6ed1ce003c6
+fetch_file "$vox_base/voxlock_chunk.onnx" "$d/voxlock/voxlock_chunk.onnx" f02a548fcbdc921b8ff22760bc2e69a86eb098e70016e0d77a49f99defc25571
+for library in libsherpa-onnx-c-api.dylib libonnxruntime.dylib; do
+    cp "$d/$sherpa/lib/$library" "$out/Frameworks/$library"
+    codesign --force --sign - "$out/Frameworks/$library"
+done
+rn="$d/rnnoise"
+model="$d/rnnoise-model.tar.gz"
+if [[ ! -f "$model" ]]; then
+    curl --fail --location --silent --show-error --retry 3 --max-time 180 \
+      https://media.xiph.org/rnnoise/models/rnnoise_data-0b50c45.tar.gz -o "$model.tmp"
+    mv "$model.tmp" "$model"
+fi
+echo "4ac81c5c0884ec4bd5907026aaae16209b7b76cd9d7f71af582094a2f98f4b43  $model" | shasum -a 256 -c
+# Only the generated C source and header are needed to run the model.
+tar xf "$model" -C "$rn" src/rnnoise_data.c src/rnnoise_data.h
+flags=(-O3 -mmacosx-version-min=14.0)
+obj=()
+for f in denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables; do
+    xcrun clang "${flags[@]}" -I "$rn/include" -I "$rn/src" -I Engine -c "$rn/src/$f.c" -o "$b/obj/$f.o"
+    obj+=("$b/obj/$f.o")
+done
+for f in Quiet Isolation MiniAudio; do
+    xcrun clang "${flags[@]}" -Wall -Wextra -I "$rn/include" -I "$d/miniaudio" -I "$d" \
+        -DMA_NO_DECODING -DMA_NO_ENCODING -DMA_NO_ENGINE -DMA_NO_RESOURCE_MANAGER \
+        -DMA_NO_GENERATION -DMA_NO_NODE_GRAPH -DMA_NO_RUNTIME_LINKING \
+        -c "Engine/$f.c" -o "$b/obj/$f.o"
+    obj+=("$b/obj/$f.o")
+done
+frameworks=(-framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework CoreFoundation)
+isolation_libs=(-L "$out/Frameworks" -lsherpa-onnx-c-api)
+xcrun clang "${flags[@]}" -Wall -Wextra -Werror -I Engine Tests/verify.c "${obj[@]}" "${frameworks[@]}" "${isolation_libs[@]}" -Wl,-rpath,@executable_path/Frameworks -o "$out/rq-verify"
+if [[ "${1:-}" == "--test-only" ]]; then exit; fi
+app="$out/RalpQuiet.app"
+mkdir -p "$app/Contents/"{MacOS,Resources}
+cp App/Info.plist "$app/Contents/Info.plist"
+cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+cp third_party/*.txt "$app/Contents/Resources/"
+cp docs/THIRD-PARTY.md "$app/Contents/Resources/"
+mkdir -p "$app/Contents/Frameworks" "$app/Contents/Resources/VoxLock"
+rm -f "$app/Contents/Resources/VoxLock/voxlock_chunk_int8.onnx"
+cp "$out/Frameworks/"*.dylib "$app/Contents/Frameworks/"
+cp "$d/voxlock/voxlock_enroll.onnx" "$d/voxlock/voxlock_chunk.onnx" "$app/Contents/Resources/VoxLock/"
+arch="$(uname -m)"
+swift_target="$arch-apple-macosx14.0"
+xcrun swiftc -swift-version 6 -O -target "$swift_target" -I Engine App/*.swift "${obj[@]}" \
+    "${frameworks[@]}" "${isolation_libs[@]}" -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$app/Contents/MacOS/RalpQuiet"
+codesign --force --sign - "$app"
+for kind in Microphone Speaker; do
+    lower="$(echo "$kind" | tr '[:upper:]' '[:lower:]')"
+    bundle="$out/RalpQuiet${kind}.driver"
+    id="com.ralpberrylabs.ralpquiet.$lower"
+    mkdir -p "$bundle/Contents/"{MacOS,Resources}
+    if [[ "$kind" == Microphone ]]; then
+        factory="3803389f-eed9-4f32-9cd8-758e6001e19d"
+    else
+        factory="765651f6-6cee-453a-b463-a27fd17f3d3f"
+    fi
+    sed -e "s/@KIND@/$kind/g" -e "s/@BUNDLE@/$id/g" -e "s/@FACTORY@/$factory/g" \
+        Driver/Info.plist.in > "$bundle/Contents/Info.plist"
+    xcrun clang "${flags[@]}" -bundle -framework CoreFoundation -framework CoreAudio -framework Accelerate \
+        -DkHas_Driver_Name_Format=false "-DkDriver_Name=\"RalpQuiet${kind}\"" \
+        "-DkDevice_Name=\"RalpQuiet ${kind}\"" "-DkPlugIn_BundleID=\"$id\"" \
+        '-DkManufacturer_Name="Ralpberry Labs"' -DkSampleRates=48000 \
+        -Wno-format-extra-args -DkCanBeDefaultSystemDevice=false -DkEnableVolumeControl=false \
+        "$d/blackhole/BlackHole/BlackHole.c" -o "$bundle/Contents/MacOS/Loopback"
+    cp LICENSE "$bundle/Contents/Resources/LICENSE.txt"
+    cp docs/THIRD-PARTY.md "$bundle/Contents/Resources/"
+    codesign --force --sign - "$bundle"
+done
+printf 'Built %s\n' "$out"

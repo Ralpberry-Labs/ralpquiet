@@ -1,0 +1,20 @@
+name: macOS checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application and drivers
+        run: ./scripts/build
+      - name: Verify DSP and bundles
+        run: |
+          .dist/rq-verify
+          for bundle in .dist/*.app .dist/*.driver; do
+            plutil -lint "$bundle/Contents/Info.plist"
+            codesign --verify --strict "$bundle"
+          done

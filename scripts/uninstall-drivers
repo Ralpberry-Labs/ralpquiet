@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+hal="/Library/Audio/Plug-Ins/HAL"
+sudo /bin/rm -rf -- "$hal/RalpQuietMicrophone.driver" "$hal/RalpQuietSpeaker.driver"
+printf 'RalpQuiet drivers removed. Restart your Mac to finish.\n'
