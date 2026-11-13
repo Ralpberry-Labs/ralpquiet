@@ -14,6 +14,7 @@ jobs:
       - name: Verify DSP and bundles
         run: |
           .dist/rq-verify
+          .dist/rq-verify --echo
           for bundle in .dist/*.app .dist/*.driver; do
             plutil -lint "$bundle/Contents/Info.plist"
             codesign --verify --strict "$bundle"

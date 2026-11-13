@@ -49,7 +49,10 @@ struct Dashboard: View {
                     Divider()
                     devicePicker("Physical speaker", icon: "speaker.wave.2.fill", devices: audio.speakers, selection: $audio.speaker)
                     Toggle("Route meeting audio through RalpQuiet Speaker", isOn: $audio.speakerEnabled).disabled(locked)
-                    if audio.speakerEnabled { Toggle("Remove noise from meeting audio", isOn: $audio.suppressSpeaker) }
+                    if audio.speakerEnabled {
+                        Toggle("Remove noise from meeting audio", isOn: $audio.suppressSpeaker)
+                        Toggle("Cancel speaker echo in the microphone", isOn: $audio.echoEnabled).disabled(locked)
+                    }
                 }.padding(17).quietPanel()
                 voicePanel
                 testPanel

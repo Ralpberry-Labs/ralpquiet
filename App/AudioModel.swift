@@ -61,6 +61,8 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
     var suppressMic = true { didSet { rq_route_set_suppress(outgoing, suppressMic) } }
     var suppressSpeaker = true { didSet { rq_route_set_suppress(incoming, suppressSpeaker) } }
     var speakerEnabled = false
+    var echoEnabled = true
+    private var echo: OpaquePointer?
     var isolateVoice = false
     var hasProfile = false
     var enrolling = false
@@ -151,7 +153,7 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
     }
 
     private nonisolated static func createRoute(_ input: String, _ output: String?, suppress: Bool,
-                                    models: String? = nil, profile: String? = nil) -> (OpaquePointer?, String?) {
+                                    models: String? = nil, profile: Data? = nil, echo: OpaquePointer? = nil, render: Bool = false) -> (OpaquePointer?, String?) {
         var error = Array(repeating: CChar(0), count: 256)
         func withOptional<T>(_ str: String?, _ body: (UnsafePointer<CChar>?) -> T) -> T {
             if let str { return str.withCString(body) }
@@ -160,10 +162,14 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         let route = input.withCString { inputID in
             withOptional(output) { outputID in
                 withOptional(models) { modelID in
-                    withOptional(profile) { profileID in
-                        error.withUnsafeMutableBufferPointer {
-                            rq_route_open(inputID, outputID, suppress, modelID, profileID, $0.baseAddress, $0.count)
+                    error.withUnsafeMutableBufferPointer { err in
+                        if let profile {
+                            return profile.withUnsafeBytes { view in
+                                let voice = view.bindMemory(to: UInt8.self)
+                                return rq_route_open(inputID, outputID, suppress, modelID, voice.baseAddress, voice.count, echo, render, err.baseAddress, err.count)
+                            }
                         }
+                        return rq_route_open(inputID, outputID, suppress, modelID, nil, 0, echo, render, err.baseAddress, err.count)
                     }
                 }
             }
@@ -171,8 +177,8 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         return (route, route == nil ? error.withUnsafeBytes { decodeBytes($0) } : nil)
     }
 
-    private func openRoute(_ input: String, _ output: String?, suppress: Bool) -> OpaquePointer? {
-        let (route, message) = Self.createRoute(input, output, suppress: suppress)
+    private func openRoute(_ input: String, _ output: String?, suppress: Bool, echo: OpaquePointer? = nil, render: Bool = false) -> OpaquePointer? {
+        let (route, message) = Self.createRoute(input, output, suppress: suppress, echo: echo, render: render)
         if let message { issue = message }
         return route
     }
@@ -182,8 +188,8 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         let message: String?
     }
 
-    private nonisolated static func createIsolationRoute(input: String, models: String, profile: String) -> RouteResult {
-        let (route, message) = createRoute(input, AudioEndpoint.mic, suppress: false, models: models, profile: profile)
+    private nonisolated static func createIsolationRoute(input: String, models: String, profile: Data, echoAddress: UInt?) -> RouteResult {
+        let (route, message) = createRoute(input, AudioEndpoint.mic, suppress: false, models: models, profile: profile, echo: echoAddress.flatMap(OpaquePointer.init(bitPattern:)))
         return RouteResult(pointer: route, message: message)
     }
 
@@ -202,31 +208,36 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         pending = true
         defer { pending = false }
         guard await authorize() else { return }
+        let nextEcho = speakerEnabled && echoEnabled ? rq_echo_open() : nil
+        if speakerEnabled && echoEnabled {
+            guard nextEcho != nil else { issue = "Could not initialize acoustic echo cancellation."; return }
+        }
+        defer { if !live { closeRoutes(); rq_echo_close(nextEcho) } }
         if isolateVoice {
             guard let profile = voiceProfile, microphone == enrollmentMicrophone else {
                 issue = "Record a new voice sample with this microphone before turning on Only my voice."
                 return
             }
-            let input = microphone, models = modelsPath
+            let input = microphone, models = modelsPath, echoAddress = nextEcho.map { UInt(bitPattern: $0) }
             let result = await Task.detached(priority: .userInitiated) {
-                do {
-                    return try Self.withVoiceFile(profile) {
-                        Self.createIsolationRoute(input: input, models: models, profile: $0)
-                    }
-                } catch {
-                    return RouteResult(pointer: nil, message: "Could not prepare the local voice sample.")
-                }
+                Self.createIsolationRoute(input: input, models: models, profile: profile, echoAddress: echoAddress)
             }.value
             guard let route = result.pointer else { issue = result.message; return }
+            guard microphone == input, hasProfile, micInstalled else {
+                rq_route_close(route)
+                issue = "The microphone changed while preparing voice isolation. Select a microphone and try again."
+                return
+            }
             outgoing = route
         } else {
-            guard let route = openRoute(microphone, AudioEndpoint.mic, suppress: suppressMic) else { return }
+            guard let route = openRoute(microphone, AudioEndpoint.mic, suppress: suppressMic, echo: nextEcho) else { return }
             outgoing = route
         }
         if speakerEnabled {
-            incoming = openRoute(AudioEndpoint.speaker, speaker, suppress: suppressSpeaker)
-            if incoming == nil { closeRoutes(); return }
+            incoming = openRoute(AudioEndpoint.speaker, speaker, suppress: suppressSpeaker, echo: nextEcho, render: true)
+            if incoming == nil { return }
         }
+        echo = nextEcho
         live = true
     }
 
@@ -244,6 +255,7 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         rq_route_close(incoming); incoming = nil
         rq_route_close(outgoing); outgoing = nil
         rq_route_close(preview); preview = nil
+        rq_echo_close(echo); echo = nil
         live = false
         inputLevel = 0
         outputLevel = 0
@@ -328,10 +340,10 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
                 comparisonTask = Task { [weak self] in
                     let output = await Task.detached(priority: .userInitiated) { [raw, path, profile, frames] () -> [Float]? in
                         var samples = Array(repeating: Float(0), count: frames)
-                        let ok = try? Self.withVoiceFile(profile) {
-                            rq_personalized_compare(path, $0, raw, UInt32(frames), &samples)
+                        return profile.withUnsafeBytes { view in
+                            let voice = view.bindMemory(to: UInt8.self)
+                            return rq_personalized_compare(path, voice.baseAddress, voice.count, raw, UInt32(frames), &samples) ? samples : nil
                         }
-                        return ok == true ? samples : nil
                     }.value
                     guard let self, !Task.isCancelled else { return }
                     self.comparing = false
@@ -363,17 +375,6 @@ private func decodeBytes(_ bytes: UnsafeRawBufferPointer) -> String {
         enrollmentMicrophone = microphone
         hasProfile = true
         isolateVoice = true
-    }
-
-    private nonisolated static func withVoiceFile<T>(_ data: Data, _ use: (String) -> T) throws -> T {
-        let fm = FileManager.default
-        let dir = fm.temporaryDirectory.appendingPathComponent("com.ralpberrylabs.ralpquiet-" + UUID().uuidString, isDirectory: true)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        defer { try? fm.removeItem(at: dir) }
-        let profile = dir.appendingPathComponent("VoiceSample.wav")
-        try data.write(to: profile, options: .atomic)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: profile.path)
-        return use(profile.path)
     }
 
     func eraseVoice() {

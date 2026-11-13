@@ -44,6 +44,8 @@ struct rq_route {
     bool ctx_ok, cap_ok, play_ok, queue_ok, primed;
     rq_filter *live, *comparison;
     rq_isolation *isolation;
+    rq_echo *echo;
+    bool render_reference;
     bool isolated_started, isolated_primed;
     float frame[RQ_FRAME], cleaned[RQ_FRAME], dry_delay[FILTER_DELAY], test_delay[FILTER_DELAY];
     unsigned frame_len, delay_pos, test_pos;
@@ -97,14 +99,14 @@ static void playback_cb(ma_device *device, void *output, const void *input, ma_u
         // small reserve to absorb compute jitter; missing output is silence.
         if (rq_isolation_failed(r->isolation)) return;
         unsigned ready = rq_isolation_available(r->isolation);
-        if (!r->isolated_primed && (ready < 5 * RQ_FRAME || ready < n)) {
+        if (!r->isolated_primed && (ready < RQ_ISOLATION_PRIME_FRAMES * RQ_FRAME || ready < n)) {
             atomic_store_explicit(&r->out_peak, 0, memory_order_relaxed);
             return;
         }
         r->isolated_primed = true;
         float mono[1024];
-        if (ready > 11 * RQ_FRAME && ready > n + 8 * RQ_FRAME) {
-            unsigned excess = ready - n - 8 * RQ_FRAME;
+        if (ready > RQ_ISOLATION_HIGH_FRAMES * RQ_FRAME && ready > n + RQ_ISOLATION_PRIME_FRAMES * RQ_FRAME) {
+            unsigned excess = ready - n - RQ_ISOLATION_PRIME_FRAMES * RQ_FRAME;
             (void)rq_isolation_pop(r->isolation, mono, excess > 1024 ? 1024 : excess);
             atomic_fetch_add_explicit(&r->overruns, 1, memory_order_relaxed);
         }
@@ -131,7 +133,10 @@ static void playback_cb(ma_device *device, void *output, const void *input, ma_u
         return;
     }
     unsigned available = ma_pcm_rb_available_read(&r->queue);
-    if (!r->primed && (available < TARGET || available < n)) return;
+    if (!r->primed && (available < TARGET || available < n)) {
+        if (r->render_reference) rq_echo_render(r->echo, out, n, channels);
+        return;
+    }
     r->primed = true;
     // Independent hardware clocks drift. Bound added latency even after a slow consumer.
     if (available > TARGET + 3 * RQ_FRAME && available > n + TARGET) {
@@ -140,6 +145,7 @@ static void playback_cb(ma_device *device, void *output, const void *input, ma_u
         atomic_fetch_add_explicit(&r->overruns, 1, memory_order_relaxed);
     }
     unsigned copied = dequeue(r, out, n, channels);
+    if (r->render_reference) rq_echo_render(r->echo, out, n, channels);
     if (copied < n) {
         r->primed = false;
         atomic_fetch_add_explicit(&r->underruns, 1, memory_order_relaxed);
@@ -181,6 +187,7 @@ static void capture_cb(ma_device *device, void *output, const void *input, ma_ui
         if (r->frame_len != RQ_FRAME) continue;
         r->frame_len = 0;
         compare_frame(r);
+        if (r->echo && !r->render_reference) rq_echo_capture(r->echo, r->frame);
         rq_filter_frame(r->live, r->frame, r->cleaned);
         float aim = atomic_load_explicit(&r->suppress, memory_order_relaxed) ? 1.f : 0.f;
         float start = r->blend, peak_in = 0, peak_out = 0;
@@ -230,11 +237,14 @@ static bool device_id(ma_device_id *id, const char *uid) {
     return true;
 }
 rq_route *rq_route_open(const char *input_uid, const char *output_uid, bool suppress,
-                       const char *models, const char *voice_sample, char *error, size_t error_capacity) {
+                       const char *models, const unsigned char *voice_sample, size_t voice_bytes, rq_echo *echo, bool render_reference,
+                       char *error, size_t error_capacity) {
     const char *step = "allocate audio engine";
     ma_result result = MA_OUT_OF_MEMORY;
     rq_route *r = calloc(1, sizeof *r);
     if (!r) goto fail;
+    r->echo = echo;
+    r->render_reference = render_reference;
     if (output_uid && strcmp(input_uid ? input_uid : "", output_uid) == 0) {
         step = "route input to itself"; result = MA_INVALID_ARGS; goto fail;
     }
@@ -253,7 +263,7 @@ rq_route *rq_route_open(const char *input_uid, const char *output_uid, bool supp
     if (!r->live || !r->comparison || !r->raw || !r->wet) goto fail;
     if (models && voice_sample) {
         step = "start voice isolation";
-        r->isolation = rq_isolation_create(models, voice_sample);
+        r->isolation = rq_isolation_create(models, voice_sample, voice_bytes);
         if (!r->isolation) {
             if (error && error_capacity)
                 snprintf(error, error_capacity, "Only my voice could not initialize or keep up on this Mac. Try a local test or use Remove microphone noise for the call.");
@@ -362,6 +372,6 @@ void rq_test_copy(const rq_route *r, float *raw, float *wet, unsigned frames) {
     }
 }
 
-bool rq_personalized_compare(const char *models, const char *voice_sample, const float *input, unsigned frames, float *output) {
-    return rq_isolation_file(models, voice_sample, input, frames, output);
+bool rq_personalized_compare(const char *models, const unsigned char *voice_sample, size_t voice_bytes, const float *input, unsigned frames, float *output) {
+    return rq_isolation_file(models, voice_sample, voice_bytes, input, frames, output);
 }

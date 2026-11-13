@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "Quiet.h"
+#include "../Engine/Isolation.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,20 @@ static int filter_raw(const char *src, const char *dst) {
     rq_filter_destroy(filter);
     return result;
 }
+static unsigned char *read_profile(const char *path, size_t *count) {
+    *count=0;
+    FILE *file=fopen(path,"rb");
+    if (!file) return NULL;
+    if (fseek(file,0,SEEK_END)) { fclose(file); return NULL; }
+    long bytes=ftell(file);
+    rewind(file);
+    if (bytes<44 || bytes>2000000) { fclose(file); return NULL; }
+    unsigned char *data=malloc((size_t)bytes);
+    if (data && fread(data,1,(size_t)bytes,file)!=(size_t)bytes) { free(data); data=NULL; }
+    fclose(file);
+    if (data) *count=(size_t)bytes;
+    return data;
+}
 static int isolate(const char *models, const char *profile, const char *src, const char *dst) {
     if (!strcmp(src, dst)) return 2;
     FILE *in = fopen(src, "rb");
@@ -69,7 +84,11 @@ static int isolate(const char *models, const char *profile, const char *src, con
     int rc = 2;
     if (input && output && fread(input, sizeof(float), n, in) == n) {
         double start = ms();
-        if (rq_personalized_compare(models, profile, input, n, output)) {
+        size_t voice_bytes;
+        unsigned char *voice=read_profile(profile,&voice_bytes);
+        bool ok=voice && rq_personalized_compare(models,voice,voice_bytes,input,n,output);
+        free(voice);
+        if (ok) {
             printf("VoxLock: %.2f s processed in %.2f s (includes model load and enrollment)\n",
                    (double)n / RQ_RATE, (ms() - start) / 1000);
             FILE *out = fopen(dst, "wb");
@@ -83,11 +102,91 @@ static int isolate(const char *models, const char *profile, const char *src, con
     free(input); free(output);
     return rc;
 }
+static int timed_stream(const char *models, const char *profile, const char *src) {
+    FILE *file=fopen(src,"rb");
+    if (!file) return 2;
+    size_t voice_bytes;
+    unsigned char *voice=read_profile(profile,&voice_bytes);
+    rq_isolation *stream=voice ? rq_isolation_create(models,voice,voice_bytes) : NULL;
+    free(voice);
+    if (!stream) { fclose(file); fprintf(stderr,"Voice isolation startup speed check failed\n"); return 2; }
+    float frame[RQ_FRAME], out[RQ_FRAME];
+    unsigned n=0, gaps=0, ready=0, overruns=0;
+    bool primed=false;
+    double due=ms(), sum=0, start_delay=0;
+    while (fread(frame,sizeof(float),RQ_FRAME,file)==RQ_FRAME) {
+        if (!rq_isolation_push(stream,frame,RQ_FRAME)) break;
+        ++n;
+        if (!primed && rq_isolation_available(stream)>=RQ_FRAME*RQ_ISOLATION_PRIME_FRAMES) {
+            primed=true;
+            start_delay=10.*n;
+        }
+        if (primed) {
+            unsigned available=rq_isolation_available(stream);
+            if (available>RQ_FRAME*RQ_ISOLATION_HIGH_FRAMES) ++overruns;
+            unsigned samples=rq_isolation_pop(stream,out,RQ_FRAME);
+            ready+=samples;
+            if (samples<RQ_FRAME) ++gaps;
+            for (unsigned i=0;i<samples;++i) sum+=out[i]*out[i];
+        }
+        due+=10.;
+        double pause=due-ms();
+        if (pause>0) {
+            struct timespec wait={0,(long)(pause*1.e6)};
+            nanosleep(&wait,NULL);
+        }
+    }
+    bool failed=rq_isolation_failed(stream);
+    rq_isolation_destroy(stream);
+    fclose(file);
+    printf("Paced worker: %.2f s input, first buffered output at %.0f ms, %u underruns, %u queue peaks, %u delivered frames\n",
+           n/100.,start_delay,gaps,overruns,ready/RQ_FRAME);
+    return !(n>=500 && primed && gaps==0 && !failed && overruns==0 && sum>0.001);
+}
+static int echo_test(void) {
+    rq_echo *echo = rq_echo_open();
+    if (!echo) return 2;
+    enum { FRAMES = 1500, HISTORY = 4800, DELAY = 1100 };
+    float line[HISTORY] = {0}, far[RQ_FRAME], mic[RQ_FRAME];
+    double before = 0, after = 0, near_before = 0, near_after = 0, dot = 0;
+    float correlated = 0;
+    for (int f=0; f<FRAMES; ++f) {
+        bool double_talk = f >= 1100;
+        for (int i=0; i<RQ_FRAME; ++i) {
+            int j=f*RQ_FRAME+i;
+            correlated=0.83f*correlated+0.17f*uniform();
+            far[i]=0.5f*correlated;
+            line[j%HISTORY]=far[i];
+            float bounce= j>=DELAY+190 ? line[(j-DELAY)%HISTORY]*0.56f + line[(j-DELAY-190)%HISTORY]*0.17f : 0;
+            float near=double_talk ? 0.08f*sinf((float)(j%48000)*(2.f*3.14159265f*511.f/48000.f)) : 0;
+            mic[i]=bounce+near;
+            if (f>=650 && f<1100) before+=mic[i]*mic[i];
+        }
+        rq_echo_render(echo,far,RQ_FRAME,1);
+        if (!rq_echo_capture(echo,mic)) { rq_echo_close(echo); return 2; }
+        for (int i=0; i<RQ_FRAME; ++i) {
+            if (f>=650 && f<1100) after+=mic[i]*mic[i];
+            if (f>=1300) {
+                int j=f*RQ_FRAME+i;
+                float near=0.08f*sinf((float)(j%48000)*(2.f*3.14159265f*511.f/48000.f));
+                near_before+=near*near; near_after+=mic[i]*mic[i]; dot+=near*mic[i];
+            }
+        }
+    }
+    rq_echo_close(echo);
+    double reduction=10*log10(before/after), gain=20*log10(fabs(dot)/near_before);
+    double correlation=fabs(dot)/sqrt(near_before*near_after);
+    printf("AEC3: %.1f dB synthetic echo reduction; local tone change %+.1f dB (correlation %.3f)\n",
+           reduction,gain,correlation);
+    return !(reduction >= 12 && gain >= -3 && gain <= 3 && correlation >= .70);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--devices")) return devices();
     if (argc == 4 && !strcmp(argv[1], "--raw")) return filter_raw(argv[2], argv[3]);
     if (argc == 6 && !strcmp(argv[1], "--isolate")) return isolate(argv[2], argv[3], argv[4], argv[5]);
-    if (argc != 1) { fprintf(stderr, "usage: rq-verify [--devices | --raw input.f32 output.f32 | --isolate models voice.wav input.f32 output.f32]\n"); return 2; }
+    if (argc == 5 && !strcmp(argv[1], "--stream")) return timed_stream(argv[2], argv[3], argv[4]);
+    if (argc == 2 && !strcmp(argv[1], "--echo")) return echo_test();
+    if (argc != 1) { fprintf(stderr, "usage: rq-verify [--devices | --raw input.f32 output.f32 | --isolate models voice.wav input.f32 output.f32 | --stream models voice.wav input.f32 | --echo]\n"); return 2; }
     rq_filter *a = rq_filter_create(), *b = rq_filter_create();
     if (!a || !b) return 1;
     float x[RQ_FRAME] = {0}, y[RQ_FRAME], z[RQ_FRAME];

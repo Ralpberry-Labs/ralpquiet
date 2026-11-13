@@ -31,18 +31,25 @@ fetch_file() {
         return 1
     fi
 }
-sherpa="sherpa-onnx-v2.0.1-osx-universal2-shared-no-tts-lib"
-fetch_file "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/$sherpa.tar.bz2" "$d/sherpa.tar.bz2" 242b0593a033456e9344a76a11713d1c55da794d0e37eabf6acabaf7beeb2b36
-fetch_file https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v2.0.1/sherpa-onnx/c-api/c-api.h "$d/sherpa-v2.0.1.h" 5698f38ba09ad2bdf085c56a6cbbd7741acf15e25f4ce5c7097b9702cadf437f
-tar xf "$d/sherpa.tar.bz2" -C "$d"
-mkdir -p "$d/voxlock" "$out/Frameworks"
-vox_base=https://github.com/arbazsiddiqui/voxlock/releases/download/sherpa-onnx-models
-fetch_file "$vox_base/voxlock_enroll.onnx" "$d/voxlock/voxlock_enroll.onnx" 5d06048c156bb8cd422d29848e6d38fb26a7b39f6f7fd92eccf2a6ed1ce003c6
-fetch_file "$vox_base/voxlock_chunk.onnx" "$d/voxlock/voxlock_chunk.onnx" f02a548fcbdc921b8ff22760bc2e69a86eb098e70016e0d77a49f99defc25571
-for library in libsherpa-onnx-c-api.dylib libonnxruntime.dylib; do
-    cp "$d/$sherpa/lib/$library" "$out/Frameworks/$library"
-    codesign --force --sign - "$out/Frameworks/$library"
-done
+if [[ "$(uname -m)" != arm64 ]]; then echo "This preview requires Apple Silicon." >&2; exit 1; fi
+ort="onnxruntime-osx-arm64-1.32.0"
+fetch_file "https://github.com/microsoft/onnxruntime/releases/download/v1.32.0/$ort.tgz" "$d/ort-1.32.0.tgz" 8ddca23f532b9d4fbb279ba9b08dab6c0ac94fdc9aec2eb44a1db7049216c043
+tar xf "$d/ort-1.32.0.tgz" -C "$d" "$ort/include" "$ort/lib/libonnxruntime.1.32.0.dylib"
+mkdir -p "$d/voxlock-v2" "$out/Frameworks"
+vox_base=https://huggingface.co/arbazsiddiqui/voxlock/resolve/2413b292bc2c337bfc19a9802aaf3e011e68e9c4/onnx/v2
+fetch_file "$vox_base/enroll.onnx?download=true" "$d/voxlock-v2/enroll.onnx" 81f305c9b7a32f13d1401f53bb4c6301826a607c9e807e60912f36ef1b9fae29
+fetch_file "$vox_base/chunk_int8.onnx?download=true" "$d/voxlock-v2/chunk_int8.onnx" c50ffdc8d723fd4f91cb08889f3d0143491f95967b705f35c444a0b4afe88172
+rm -f "$out/Frameworks/libsherpa-onnx-c-api.dylib" "$out/Frameworks/libonnxruntime.dylib"
+cp "$d/$ort/lib/libonnxruntime.1.32.0.dylib" "$out/Frameworks/libonnxruntime.1.dylib"
+codesign --force --sign - "$out/Frameworks/libonnxruntime.1.dylib"
+webrtc_tag=m155.8059.4.0
+fetch_file "https://github.com/Sqhh99/webrtc-audio-processing/releases/download/$webrtc_tag/webrtc-audio-processing.macos_arm64.tar.gz" "$d/webrtc.tar.gz" d4a04630fb9b37b2b3742200bbdb15f419013783b307287108589b8ba7b4768e
+mkdir -p "$d/webrtc"
+tar xf "$d/webrtc.tar.gz" -C "$d/webrtc"
+aec_lib=libwebrtc-audio-processing-3.1.dylib
+cp "$d/webrtc/lib/$aec_lib" "$out/Frameworks/$aec_lib"
+install_name_tool -id "@rpath/$aec_lib" "$out/Frameworks/$aec_lib"
+codesign --force --sign - "$out/Frameworks/$aec_lib"
 rn="$d/rnnoise"
 model="$d/rnnoise-model.tar.gz"
 if [[ ! -f "$model" ]]; then
@@ -67,7 +74,14 @@ for f in Quiet Isolation MiniAudio; do
     obj+=("$b/obj/$f.o")
 done
 frameworks=(-framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework CoreFoundation)
-isolation_libs=(-L "$out/Frameworks" -lsherpa-onnx-c-api)
+xcrun clang++ "${flags[@]}" -std=c++17 -Wall -Wextra -isystem "$d/$ort/include" \
+   -c Engine/SpeakerModel.cpp -o "$b/obj/SpeakerModel.o"
+obj+=("$b/obj/SpeakerModel.o")
+xcrun clang++ "${flags[@]}" -std=c++20 -Wall -Wextra \
+   -isystem "$d/webrtc/include/webrtc-audio-processing-3" -isystem "$d/webrtc/include" -isystem "$d/miniaudio" \
+   -c Engine/Echo.cpp -o "$b/obj/Echo.o"
+obj+=("$b/obj/Echo.o")
+isolation_libs=("$out/Frameworks/libonnxruntime.1.dylib" "$out/Frameworks/$aec_lib" -lc++)
 xcrun clang "${flags[@]}" -Wall -Wextra -Werror -I Engine Tests/verify.c "${obj[@]}" "${frameworks[@]}" "${isolation_libs[@]}" -Wl,-rpath,@executable_path/Frameworks -o "$out/rq-verify"
 if [[ "${1:-}" == "--test-only" ]]; then exit; fi
 app="$out/RalpQuiet.app"
@@ -77,9 +91,10 @@ cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 cp third_party/*.txt "$app/Contents/Resources/"
 cp docs/THIRD-PARTY.md "$app/Contents/Resources/"
 mkdir -p "$app/Contents/Frameworks" "$app/Contents/Resources/VoxLock"
-rm -f "$app/Contents/Resources/VoxLock/voxlock_chunk_int8.onnx"
-cp "$out/Frameworks/"*.dylib "$app/Contents/Frameworks/"
-cp "$d/voxlock/voxlock_enroll.onnx" "$d/voxlock/voxlock_chunk.onnx" "$app/Contents/Resources/VoxLock/"
+rm -f "$app/Contents/Resources/VoxLock/voxlock_chunk_int8.onnx" "$app/Contents/Resources/VoxLock/voxlock_chunk.onnx" "$app/Contents/Resources/VoxLock/voxlock_enroll.onnx"
+rm -f "$app/Contents/Frameworks/libsherpa-onnx-c-api.dylib" "$app/Contents/Frameworks/libonnxruntime.dylib"
+cp "$out/Frameworks/libonnxruntime.1.dylib" "$out/Frameworks/$aec_lib" "$app/Contents/Frameworks/"
+cp "$d/voxlock-v2/enroll.onnx" "$d/voxlock-v2/chunk_int8.onnx" "$app/Contents/Resources/VoxLock/"
 arch="$(uname -m)"
 swift_target="$arch-apple-macosx14.0"
 xcrun swiftc -swift-version 6 -O -target "$swift_target" -I Engine App/*.swift "${obj[@]}" \

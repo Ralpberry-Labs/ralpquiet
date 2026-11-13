@@ -7,13 +7,14 @@ RalpQuiet is a GPL-3.0 source preview from Ralpberry Labs. It runs entirely on y
 | Feature | What this preview does |
 | --- | --- |
 | Microphone | RNNoise suppresses non-speech noise on the outgoing route. |
-| Only my voice | VoxLock extracts speech that matches the local sample. Use it when someone else is talking nearby. A bad sample, a similar voice, or difficult acoustics can still cause leaks or remove part of your speech. Live mode checks inference speed before starting; the tested Mac did not meet the real-time requirement in our first sustained test. |
+| Only my voice | VoxLock extracts speech that matches the local sample. Use it when someone else is talking nearby. A bad sample, a similar voice, or difficult acoustics can still cause leaks or remove part of your speech. Live mode checks inference speed before routing. See the paced runtime test and the system-level validation still needed. |
 | Speaker | Optional noise removal on incoming meeting audio; the cleaned signal plays on your physical speaker or headphones. This uses a mono speech mix. |
+| Acoustic echo | WebRTC AEC3 uses the rendered speaker signal as a reference. Requires choosing RalpQuiet Speaker in the call. |
 | Run a test | Record up to 12 seconds, then switch between the original and cleaned version at the same playback position. Clips stay in memory. |
 
 ## Setup
 
-Requires macOS 14 or later, Xcode Command Line Tools with Swift 6, and an administrator account for virtual driver installation. The developer build signs the bundles locally. The first build downloads pinned open-source dependencies and model weights; audio processing requires no network.
+Requires an Apple Silicon Mac with macOS 14 or later, Xcode Command Line Tools with Swift 6, and an administrator account for virtual driver installation. The developer build signs the bundles locally. The first build downloads pinned open-source dependencies and model weights; audio processing requires no network.
 
 ```sh
 git clone https://github.com/Ralpberry-Labs/ralpquiet.git
@@ -26,7 +27,7 @@ Restart the Mac after installing the drivers. Run `open .dist/RalpQuiet.app` and
 
 1. For **Only my voice**, choose **Record my voice** and speak alone for 5–12 seconds using your usual microphone. Test with someone speaking over you before relying on it for a call. The sample is scoped to this app session; use **Forget voice** to clear it.
 2. Choose **Start routing**. In Google Meet, open **Settings → Audio** and select **RalpQuiet Microphone**. The status in RalpQuiet reports its own audio routing; confirm the device selection in Meet.
-3. Leave Meet’s speaker set to your usual output for microphone-only use, or enable **Route meeting audio through RalpQuiet Speaker** before starting and select **RalpQuiet Speaker** in Meet.
+3. Leave Meet’s speaker set to your usual output for microphone-only use, or enable **Route meeting audio through RalpQuiet Speaker** before starting and select **RalpQuiet Speaker** in Meet. This also supplies the reference for the acoustic echo toggle.
 4. For a fair A/B test, turn off Meet’s separate Noise cancellation setting if your account exposes it. Keep headphones connected if speaker bleed is an issue.
 5. Switch Meet back to your usual devices before quitting RalpQuiet.
 
@@ -36,7 +37,8 @@ Run `./scripts/uninstall-drivers` and restart the Mac to remove the two virtual 
 
 ```sh
 .dist/rq-verify
-RQ_BENCH=1 ./scripts/benchmark.py  # requires ffmpeg and the Samantha and Daniel macOS voices
+.dist/rq-verify --echo
+RQ_BENCH=1 ./scripts/benchmark.py --paced  # requires ffmpeg and the Samantha, Daniel and Tessa macOS voices
 ```
 
-See [test results and release criteria](docs/VALIDATION.md), [Krisp research and feature comparison](docs/KRISP-RESEARCH.md), and [third-party licenses](docs/THIRD-PARTY.md). This is an independent implementation. The preview does not include dedicated echo cancellation, automatic per-app audio detection, notes, transcription, or accent conversion.
+See [test results and release criteria](docs/VALIDATION.md), [Krisp research and feature comparison](docs/KRISP-RESEARCH.md), [head-to-head criteria](docs/HEAD-TO-HEAD.md), and [third-party licenses](docs/THIRD-PARTY.md). This is an independent implementation. The preview does not include dedicated room dereverberation, automatic per-app audio detection, notes, transcription, or accent conversion.

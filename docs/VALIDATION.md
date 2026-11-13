@@ -1,26 +1,28 @@
 # Validation and release criteria
 
-This is an early source preview. The A/B flow and the live path use the same model, but offline quality and routing reliability are separate claims.
+The following results compare RalpQuiet revisions. No results are from a head-to-head listening test with the Krisp desktop app. Local host: Apple M5 Pro, macOS 26.7.1.
 
-## Reproducible tests
+| Check | Earlier preview | Native VoxLock v1.3 + WebRTC AEC3 |
+| --- | --- | --- |
+| Warm processing throughput | 254 ms per 80 ms of audio (3.18× the block duration) | 21–29 ms per 40 ms of audio (0.53–0.73× the block duration) across local runs. Individual blocks can take longer than 40 ms. |
+| Call-paced synthetic replay | Could not keep up | Accepted 62.49 s at 48 kHz in 10 ms packets, with zero underruns after priming. First buffered output at 200 ms. A separate 12.49 s run delivered zero underruns after priming at 190 ms. These are worker tests, excluding device, driver and browser latency. |
+| Equal-level synthetic two-talker mixture | +8.1 dB SI-SDR | +14.0 dB SI-SDR. On the same mixture RNNoise alone scored −0.4 dB. |
+| Competing voice alone | 51.1 dB RMS reduction | 50.8 dB RMS reduction; approximately 0 dB for RNNoise alone. |
+| Additional synthetic mixtures | Not measured | +17.7 dB SI-SDR with competitor 6 dB louder; +7.8 dB for the same-gender pair. |
+| Ordinary noise plus speech | +11.2 dB SI-SDR | +11.2 dB SI-SDR for equal RMS white noise; this mode still uses RNNoise. |
+| Acoustic echo | No AEC | AEC3 removed 37.1 dB of synthetic echo after convergence; while an independent local tone played alongside the echo, its level changed by −1.0 dB. |
+| Mac application | Built and verified locally | SwiftUI application and drivers build; local signature and plist checks pass. |
+| End-to-end browser call | Pending | Pending. Requires loading both drivers and testing real hardware. |
 
-Local host: Apple M5 Pro, macOS 26.7.1. Use `.dist/rq-verify` for DSP sanity checks and `RQ_BENCH=1 ./scripts/benchmark.py` for the synthetic speech comparisons.
+SI-SDR rewards preservation of the known clean target waveform after gain alignment. These are synthetic fixtures, not a claim about real call quality. The pace test uses the same inference worker, queues and priming threshold as live mode. It does not include Core Audio or measure the total delay heard by a participant. The 100 ms priming reserve absorbs jitter, but gives up latency. In an initial run using a smaller reserve, 12.49 seconds of input produced two underruns.
 
-| Check | Result |
-| --- | --- |
-| Build and local code signatures | SwiftUI application and both Core Audio bundles compiled; plist and signature checks passed. |
-| Offline ordinary noise smoke test | 60.6 dB RMS reduction on synthetic white noise. RNNoise processed 10 ms blocks in about 0.35–0.53 ms on this Mac. |
-| Ordinary noise plus speech | +11.2 dB SI-SDR on one synthetic speech + white-noise mixture at equal RMS. |
-| Competing speech while the target also speaks | +8.1 dB SI-SDR for VoxLock on an equal-RMS synthetic two-voice mixture, compared with −0.4 dB for RNNoise. |
-| Competing speech while the target is quiet | 51.1 dB RMS reduction for VoxLock in this sample; approximately 0 dB for RNNoise. |
-| Live speaker extraction throughput | The full-precision model averaged roughly 254 ms for each 80 ms block in a tested host session (three inference threads). That run failed the real-time requirement. The app checks local inference speed before starting this mode and stops the route if its bounded input buffer overruns. The ordinary noise mode does not depend on VoxLock. |
-| End-to-end Meet call | Pending. The virtual devices were built and validated as bundles; loading them and completing a browser call require the local driver installation and restart. |
+```sh
+.dist/rq-verify
+.dist/rq-verify --echo
+RQ_BENCH=1 ./scripts/benchmark.py --paced
+RQ_BENCH=1 ./scripts/benchmark.py --soak
+```
 
-SI-SDR compares the output waveform to the known clean target without rewarding simple gain changes. These synthetic utterances and equal-RMS mixtures are a reproducible check, not a listening study. The model was not evaluated against Krisp's app on this machine. Throughput measurements exclude device buffers and do not represent end-to-end latency.
+The last two commands synthesize fresh fixtures with macOS voices and use ffmpeg for conversion. The loopback test uses a delayed, attenuated two-tap echo path and an independent near-end tone. For real double talk, use actual speakers and a separate near-end talker.
 
-## Before calling this Krisp quality
-
-- Run paired and level-matched blind listening tests across real home, office, and café recordings. Include clean speech, fan/keyboard noise, close competing speakers, same-timbre speakers, multiple talkers, device mismatch, and target-absent segments. Rate speech distortion, intelligibility, and leakage independently. When the dataset terms permit it, use the labeled Krisp benchmark for comparable ASR metrics.
-- Test on representative Apple Silicon Macs under load. Measure actual delivery delay and callback gaps during a full call, changes in clock drift, sleeping and waking, and unplugging devices. A suggested isolation gate is sustainable throughput and no callback dropouts over 30 minutes.
-- Test both directions in Chrome/Meet and with other supported calling apps. Confirm that stopping routing sends silence, the system default is not changed, the microphone permission flow works, and a local test plays via the selected physical speaker.
-- Add dedicated acoustic echo cancellation and evaluate loudspeaker double talk before claiming echo parity. Use Developer ID signing and notarization before distributing a one-click installer.
+See [what it takes to beat Krisp](HEAD-TO-HEAD.md) for the criteria and datasets to validate the product across different users and call conditions.
